@@ -982,10 +982,8 @@ const EnrichEngine = {
 };
 
 
-// ─── SIMILAR ARTIST ENGINE ────────────────────────────────────────────────────
-// Uses Last.fm artist.getSimilar to find artists close to the user's taste,
-// then searches Discogs for their releases. Runs in the background (non-blocking)
-// and pushes found tracks directly into S.queue to supplement preset candidates.
+// ─── SIMILAR TRACK ENGINE ────────────────────────────────────────────────────
+// Uses Last.fm track.getSimilar / artist.getSimilar
 const SimilarTrackEngine = {
   _simArtistCache: {},
   _simTrackCache: {},
@@ -994,10 +992,10 @@ const SimilarTrackEngine = {
     if (this._simArtistCache[artist]) return this._simArtistCache[artist];
     try {
       const qs = new URLSearchParams({
-        method: \'artist.getSimilar\', artist,
-        api_key: LASTFM_KEY, format: \'json\', limit: \'8\', autocorrect: \'1\'
+        method: 'artist.getSimilar', artist,
+        api_key: LASTFM_KEY, format: 'json', limit: '8', autocorrect: '1'
       });
-      const r = await fetchWithTimeout(\\/2.0/?\\, API_TIMEOUT);
+      const r = await fetchWithTimeout(`${LASTFM_BASE}/2.0/?${qs}`, API_TIMEOUT);
       if (!r.ok) return [];
       const d = await r.json();
       const names = (d.similarartists?.artist || []).slice(0, 8).map(a => a.name);
@@ -1007,14 +1005,14 @@ const SimilarTrackEngine = {
   },
 
   async _similarTracks(artist, track) {
-    const key = \\|\\;
+    const key = `${artist}|${track}`;
     if (this._simTrackCache[key]) return this._simTrackCache[key];
     try {
       const qs = new URLSearchParams({
-        method: \'track.getSimilar\', artist, track,
-        api_key: LASTFM_KEY, format: \'json\', limit: \'30\', autocorrect: \'1\'
+        method: 'track.getSimilar', artist, track,
+        api_key: LASTFM_KEY, format: 'json', limit: '30', autocorrect: '1'
       });
-      const r = await fetchWithTimeout(\\/2.0/?\\, API_TIMEOUT);
+      const r = await fetchWithTimeout(`${LASTFM_BASE}/2.0/?${qs}`, API_TIMEOUT);
       if (!r.ok) return [];
       const d = await r.json();
       const tracks = (d.similartracks?.track || []).map(t => ({
@@ -1044,22 +1042,22 @@ const SimilarTrackEngine = {
       if (added >= maxAdd) break;
       await sleep(140);
       try {
-        const found = await API.search(\\ \\, null);
+        const found = await API.search(`${tr.t} ${tr.a}`, null);
         if (found?.id && _tidalMatchOk(tr.a, tr.t, found)) {
           const t = {
             tidalId: found.id,
             t: tr.t,
             a: tr.a,
-            al: found.album?.title || \'\',
-            y: (found.album?.releaseDate || \'\').slice(0, 4),
+            al: found.album?.title || '',
+            y: (found.album?.releaseDate || '').slice(0, 4),
             art: tidalCover(found.album?.cover) || null,
             pre: null,
             d: (found.duration || 0) * 1000,
-            isrc: found.isrc || \'\',
+            isrc: found.isrc || '',
             pop: 0,
             sid: null,
-            source: \'cluster\',
-            _src: \'cluster\',
+            source: 'cluster',
+            _src: 'cluster',
             _styles: [],
             _genres: [],
             _country: null,
@@ -1076,7 +1074,6 @@ const SimilarTrackEngine = {
     return tracks;
   }
 };
-
 // ─── LISTENBRAINZ ENGINE ─────────────────────────────────────────────
 const LBEngine = {
   // Verify token and save user info
