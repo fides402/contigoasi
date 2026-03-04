@@ -986,134 +986,90 @@ const EnrichEngine = {
 // Uses Last.fm artist.getSimilar to find artists close to the user's taste,
 // then searches Discogs for their releases. Runs in the background (non-blocking)
 // and pushes found tracks directly into S.queue to supplement preset candidates.
-const SimilarArtistEngine = {
-  _simCache: {},   // artistName → [similarNames]
+const SimilarTrackEngine = {
+  _simArtistCache: {},
+  _simTrackCache: {},
 
-  async _similar(artist) {
-    if (this._simCache[artist]) return this._simCache[artist];
+  async _similarArtist(artist) {
+    if (this._simArtistCache[artist]) return this._simArtistCache[artist];
     try {
       const qs = new URLSearchParams({
-        method: 'artist.getSimilar', artist,
-        api_key: LASTFM_KEY, format: 'json', limit: '8', autocorrect: '1'
+        method: \'artist.getSimilar\', artist,
+        api_key: LASTFM_KEY, format: \'json\', limit: \'8\', autocorrect: \'1\'
       });
-      const r = await fetchWithTimeout(`${LASTFM_BASE}/2.0/?${qs}`, API_TIMEOUT);
+      const r = await fetchWithTimeout(\\/2.0/?\\, API_TIMEOUT);
       if (!r.ok) return [];
       const d = await r.json();
       const names = (d.similarartists?.artist || []).slice(0, 8).map(a => a.name);
-      this._simCache[artist] = names;
+      this._simArtistCache[artist] = names;
       return names;
     } catch { return []; }
   },
 
-  async buildClusterQueue(baseArtists, maxAdd = 15) {
-    if (!baseArtists || baseArtists.length === 0) return [];
+  async _similarTracks(artist, track) {
+    const key = \\|\\;
+    if (this._simTrackCache[key]) return this._simTrackCache[key];
+    try {
+      const qs = new URLSearchParams({
+        method: \'track.getSimilar\', artist, track,
+        api_key: LASTFM_KEY, format: \'json\', limit: \'30\', autocorrect: \'1\'
+      });
+      const r = await fetchWithTimeout(\\/2.0/?\\, API_TIMEOUT);
+      if (!r.ok) return [];
+      const d = await r.json();
+      const tracks = (d.similartracks?.track || []).map(t => ({
+        t: t.name,
+        a: t.artist?.name || artist
+      }));
+      this._simTrackCache[key] = tracks;
+      return tracks;
+    } catch { return []; }
+  },
 
-    const simSet = new Set(baseArtists);
+  async buildClusterQueue(seedTracks, maxAdd = 15) {
+    if (!seedTracks || seedTracks.length === 0) return [];
 
-    for (const artist of baseArtists) {
+    let simTracksRaw = [];
+    for (const st of seedTracks) {
       await sleep(220);
-      const similar = await this._similar(artist);
-      similar.forEach(s => simSet.add(s));
+      const similar = await this._similarTracks(st.a, st.t);
+      simTracksRaw.push(...similar);
     }
 
     let added = 0;
     const tracks = [];
-    const pool = [...simSet].sort(() => Math.random() - 0.5);
+    const pool = simTracksRaw.sort(() => Math.random() - 0.5);
 
-    for (const artist of pool) {
+    for (const tr of pool) {
       if (added >= maxAdd) break;
-      await sleep(400);
+      await sleep(140);
       try {
-        const qs = new URLSearchParams({
-          type: 'release', artist,
-          per_page: '10', page: String(Math.ceil(Math.random() * 4) + 1),
-          sort: 'want', sort_order: 'desc'
-        });
-        if (S.forcedCountry) qs.set('country', S.forcedCountry);
-        const r = await discogsFetch(`${DISCOGS_BASE}/database/search?${qs}`);
-        if (!r.ok) continue;
-        const releases = (await r.json()).results || [];
-        const valid = releases
-          .filter(rel => { const h = rel.community?.have || 0; return h >= 3 && h < DISCOGS_HAVE_MAX; })
-          .slice(0, 2);
+        const found = await API.search(\\ \\, null);
+        if (found?.id && _tidalMatchOk(tr.a, tr.t, found)) {
+          const t = {
+            tidalId: found.id,
+            t: tr.t,
+            a: tr.a,
+            al: found.album?.title || \'\',
+            y: (found.album?.releaseDate || \'\').slice(0, 4),
+            art: tidalCover(found.album?.cover) || null,
+            pre: null,
+            d: (found.duration || 0) * 1000,
+            isrc: found.isrc || \'\',
+            pop: 0,
+            sid: null,
+            source: \'cluster\',
+            _src: \'cluster\',
+            _styles: [],
+            _genres: [],
+            _country: null,
+            _labels: []
+          };
 
-        for (const rel of valid) {
-          if (added >= maxAdd) break;
-          await sleep(400);
-          try {
-            const dr = await discogsFetch(`${DISCOGS_BASE}/releases/${rel.id}`);
-            if (!dr.ok) continue;
-            const detail = await dr.json();
-            // Style guardrail: once the profile is mature, only accept releases
-            // whose genres/styles overlap with the user's top profile dimensions.
-            if (S.profileTotal >= 5) {
-              const relStyles = [...(detail.styles || []), ...(detail.genres || [])]
-                .map(s => s.toLowerCase().trim());
-              const profStyles = Object.keys(UserProfile.get())
-                .filter(k => k.startsWith('sty:') || k.startsWith('gen:'))
-                .map(k => k.slice(4));
-              if (profStyles.length > 0 && !relStyles.some(rs =>
-                profStyles.some(ps => rs.includes(ps) || ps.includes(rs))))
-                continue; // wrong genre — skip this release
-            }
-            const relAlbum = detail.title || '';
-            const relYear = String(detail.year || '').slice(0, 4);
-            const relArtist = detail.artists?.[0]?.name?.replace(/s*(d+)$/, '') || artist;
-
-            const tracklist = (detail.tracklist || [])
-              .filter(t => t.type_ !== 'heading' && t.title?.trim())
-              .sort(() => Math.random() - 0.5)
-              .slice(0, 2);
-
-            for (const track of tracklist) {
-              if (added >= maxAdd) break;
-              const ta = track.artists?.[0]?.name?.replace(/s*(d+)$/, '') || relArtist;
-              const key = `${ta}|${track.title}`;
-              if (DiscogsEngine._cache[key] === null) continue;
-              let cached = DiscogsEngine._cache[key];
-              if (!cached) {
-                await sleep(140);
-                const found = await API.search(`${track.title} ${ta}`, null);
-                if (found?.id && _tidalMatchOk(ta, track.title, found)) {
-                  cached = {
-                    id: found.id,
-                    art: tidalCover(found.album?.cover) || null,
-                    d: (found.duration || 0) * 1000,
-                    isrc: found.isrc || '',
-                    al: found.album?.title || relAlbum,
-                    y: (found.album?.releaseDate || relYear || '').slice(0, 4),
-                  };
-                  DiscogsEngine._cache[key] = cached;
-                } else { DiscogsEngine._cache[key] = null; continue; }
-              }
-              if (!cached) continue;
-
-              const t = {
-                tidalId: cached.id,
-                t: track.title,
-                a: ta,
-                al: cached.al || relAlbum,
-                y: cached.y || relYear,
-                art: cached.art,
-                pre: null,
-                d: cached.d,
-                isrc: cached.isrc,
-                pop: 0,
-                sid: null,
-                source: 'cluster',
-                _src: 'cluster',
-                _styles: detail.styles || [],
-                _genres: detail.genres || [],
-                _country: detail.country || null,
-                _labels: (detail.labels || []).slice(0, 3).map(l => l.name || ''),
-              };
-
-              if (!hasSeen(t) && !isLiked(t)) {
-                tracks.push(t);
-                added++;
-              }
-            }
-          } catch { continue; }
+          if (!hasSeen(t) && !isLiked(t)) {
+            tracks.push(t);
+            added++;
+          }
         }
       } catch { continue; }
     }
@@ -1734,7 +1690,7 @@ const Taste = {
     // Proxy-skip penalty: fetch similar artists and penalize them too (background)
     setTimeout(async () => {
       try {
-        const similar = await SimilarArtistEngine._similar(a);
+        const similar = await SimilarTrackEngine._similarArtist(a);
         for (const sim of similar.slice(0, 5)) {
           const sa = normalizeArtist(sim);
           S.taste.artists[sa] = S.taste.artists[sa] || { liked: 0, skipped: 0 };
@@ -1862,15 +1818,12 @@ const Queue = {
       const forceSeedName = (forceSeedId && S.sessionSeedTrack) ? S.sessionSeedTrack : seedTrack;
       let forceSeedTrack = Array.isArray(forceSeedName) ? forceSeedName[0] : forceSeedName;
 
-      updateSeedInfo(`Analizzando cluster a partire da: ${forceSeedTrack.t} - ${forceSeedTrack.a}...`);
-
-      const baseArtists = await GeminiEngine.getClusterArtists(forceSeedTrack);
+      updateSeedInfo(`Ricerca brani simili su Last.fm in corso: ${forceSeedTrack.t} - ${forceSeedTrack.a}...`);
 
       let merged = [];
-      if (baseArtists && baseArtists.length > 0) {
-        updateSeedInfo(`Espansione grappolo Last.fm in corso...`);
-        const clusterTracks = await SimilarArtistEngine.buildClusterQueue(baseArtists, queueNeeds);
+      const clusterTracks = await SimilarTrackEngine.buildClusterQueue([{ t: forceSeedTrack.t, a: forceSeedTrack.a }], queueNeeds);
 
+      if (clusterTracks.length > 0) {
         // Strict Catalog Filter: completely exclude any track that exists in the spreadsheet
         merged = clusterTracks.filter(ct => {
           const match = CATALOG.some(c => c.t.toLowerCase().trim() === ct.t.toLowerCase().trim() && c.a.toLowerCase().trim() === ct.a.toLowerCase().trim());
