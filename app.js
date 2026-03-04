@@ -6,7 +6,7 @@
 'use strict';
 
 // ─── CONFIG ───────────────────────────────────────────────────────
-const API_BASE = 'https://api.monochrome.tf';
+const API_BASE = 'https://us-west.monochrome.tf';
 const TIDAL_IMG = 'https://resources.tidal.com/images';
 const DISCOGS_BASE = 'https://api.discogs.com';
 const DISCOGS_TOKEN = 'fvYYQHvhAEHVshXGPHYtbAWSlTUNQpnNJcBBbYCB';
@@ -1027,19 +1027,55 @@ const SimilarTrackEngine = {
   async buildClusterQueue(seedTracks, maxAdd = 15) {
     if (!seedTracks || seedTracks.length === 0) return [];
 
-    let simTracksRaw = [];
+    let artistsToExplore = new Set();
+    let candidateTracks = [];
+
+    // Ramificazione iniziale
     for (const st of seedTracks) {
+      artistsToExplore.add(st.a);
       await sleep(220);
-      const similar = await this._similarTracks(st.a, st.t);
-      simTracksRaw.push(...similar);
+      const similarTr = await this._similarTracks(st.a, st.t);
+      similarTr.forEach(tr => {
+        candidateTracks.push(tr);
+        if (tr.a) artistsToExplore.add(tr.a);
+      });
+      await sleep(220);
+      const similarAr = await this._similarArtist(st.a);
+      similarAr.forEach(a => artistsToExplore.add(a));
+    }
+
+    // Ramificazione secondaria: per ogni artista esploriamo i brani migliori
+    const artistPool = [...artistsToExplore].sort(() => Math.random() - 0.5).slice(0, 10);
+    for (const a of artistPool) {
+      await sleep(220);
+      try {
+        const qs = new URLSearchParams({
+          method: 'artist.getTopTracks', artist: a,
+          api_key: LASTFM_KEY, format: 'json', limit: '5', autocorrect: '1'
+        });
+        const r = await fetchWithTimeout(`${LASTFM_BASE}/2.0/?${qs}`, API_TIMEOUT);
+        if (r.ok) {
+          const d = await r.json();
+          const tops = (d.toptracks?.track || []).map(t => ({
+            t: t.name,
+            a: t.artist?.name || a
+          }));
+          candidateTracks.push(...tops);
+        }
+      } catch { continue; }
     }
 
     let added = 0;
     const tracks = [];
-    const pool = simTracksRaw.sort(() => Math.random() - 0.5);
+    const pool = candidateTracks.sort(() => Math.random() - 0.5);
+    const seenCombos = new Set();
 
     for (const tr of pool) {
       if (added >= maxAdd) break;
+      const combo = `${tr.a}|${tr.t}`.toLowerCase();
+      if (seenCombos.has(combo)) continue;
+      seenCombos.add(combo);
+
       await sleep(140);
       try {
         const found = await API.search(`${tr.t} ${tr.a}`, null);
